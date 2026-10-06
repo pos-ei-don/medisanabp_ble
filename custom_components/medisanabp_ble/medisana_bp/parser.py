@@ -20,6 +20,8 @@ from sensor_state_data.enum import StrEnum
 from .const import (
     CHARACTERISTIC_BLOOD_PRESSURE,
     CHARACTERISTIC_BATTERY,
+    CHARACTERISTIC_CURRENT_TIME,
+    CLOCK_TOLERANCE_S,
     UPDATE_INTERVAL,
 )
 
@@ -283,6 +285,63 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
                 name="Pulse",
             )
 
+    async def _sync_clock(self, client: BleakClient) -> None:
+        """Set the device clock to local time if it is off.
+
+        The measurement timestamps come from the device clock, which is often
+        wrong (e.g. after a battery change). Read the Current Time characteristic
+        (0x2A2B) and write the local time if the difference exceeds
+        CLOCK_TOLERANCE_S. Errors are only logged; reading the measurements must
+        never fail because of this.
+        """
+        try:
+            if client.services.get_characteristic(CHARACTERISTIC_CURRENT_TIME) is None:
+                return
+            raw = bytes(await client.read_gatt_char(CHARACTERISTIC_CURRENT_TIME))
+            now = datetime.now().astimezone()
+            device_time = None
+            if len(raw) >= 7:
+                try:
+                    device_time = datetime(
+                        raw[0] | (raw[1] << 8), raw[2], raw[3], raw[4], raw[5], raw[6]
+                    ).replace(tzinfo=now.tzinfo)
+                except ValueError:
+                    device_time = None
+            diff = abs((now - device_time).total_seconds()) if device_time else None
+            _LOGGER.debug(
+                "Device clock: %s (raw %s), difference: %s s",
+                device_time,
+                raw.hex(),
+                None if diff is None else round(diff),
+            )
+            if diff is not None and diff <= CLOCK_TOLERANCE_S:
+                return
+            # Current Time: Exact Time 256 + Adjust Reason (0x01 = manual time update)
+            new_time = bytes(
+                [
+                    now.year & 0xFF,
+                    now.year >> 8,
+                    now.month,
+                    now.day,
+                    now.hour,
+                    now.minute,
+                    now.second,
+                    now.isoweekday(),
+                    0,
+                    0x01,
+                ]
+            )
+            await client.write_gatt_char(
+                CHARACTERISTIC_CURRENT_TIME, new_time, response=True
+            )
+            _LOGGER.info(
+                "Device clock was %s, set to %s",
+                device_time,
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        except Exception as err:
+            _LOGGER.debug("Could not set device clock: %s", err)
+
     async def _collect_remaining_records(self, client: BleakClient) -> None:
         """Receive records until the device has been quiet for QUIET_PERIOD_S."""
         loop = asyncio.get_running_loop()
@@ -348,6 +407,10 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
                     "Bleak error starting notify on %s: %s", ble_device.address, err
                 )
                 return self._finish_update()
+
+            # Sync the clock right away: some devices disconnect on their own
+            # shortly after they have sent their last stored record.
+            await self._sync_clock(client)
 
             # Wait for the first stored measurement to arrive.
             try:
