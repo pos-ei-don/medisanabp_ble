@@ -57,6 +57,10 @@ class MedisanaBPSensor(StrEnum):
     BATTERY_PERCENT = "battery_percent"
     TIMESTAMP = "timestamp"
     USER = "user"
+    SYSTOLIC_2 = "systolic_2"
+    DIASTOLIC_2 = "diastolic_2"
+    PULSE_2 = "pulse_2"
+    TIMESTAMP_2 = "timestamp_2"
 
 
 class MedisanaBPBluetoothDeviceData(BluetoothData):
@@ -232,58 +236,67 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
         return records[-1]
 
     def _apply_latest_record(self) -> None:
-        """Write the newest collected record of the primary user to the sensors."""
+        """Write the newest collected record of each user to the sensors.
+
+        User 2 gets its own sensors with the suffix "_2". All other records (user 1,
+        no user id, unknown user) keep the existing sensors, so their entity ids do
+        not change.
+        """
         if not self._records:
             return
-        primary = [r for r in self._records if r["user"] in (1, None)] or self._records
-        record = self._select_latest(primary)
-        _LOGGER.info(
-            "%s records received, using syst: %s, diast: %s, puls: %s, date: %s",
-            len(self._records),
-            record["syst"],
-            record["diast"],
-            record["puls"],
-            record["date"],
-        )
-        syst, diast, puls = record["syst"], record["diast"], record["puls"]
-        user, date = record["user"], record["date"]
-        if date is not None:
-            self.update_sensor(
-                key=str(MedisanaBPSensor.TIMESTAMP),
-                native_unit_of_measurement=None,
-                native_value=date,
-                name="Measured Date",
+        _LOGGER.debug("%s records received", len(self._records))
+        for user_id, suffix, name_suffix in ((1, "", ""), (2, "_2", " User 2")):
+            records = [
+                r for r in self._records if (r["user"] == 2) == (user_id == 2)
+            ]
+            if not records:
+                continue
+            record = self._select_latest(records)
+            _LOGGER.info(
+                "User %s: %s records received, using syst: %s, diast: %s, puls: %s, "
+                "date: %s",
+                user_id,
+                len(records),
+                record["syst"],
+                record["diast"],
+                record["puls"],
+                record["date"],
             )
-
-        if user is not None:
+            if record["date"] is not None:
+                self.update_sensor(
+                    key=str(MedisanaBPSensor.TIMESTAMP) + suffix,
+                    native_unit_of_measurement=None,
+                    native_value=record["date"],
+                    name="Measured Date" + name_suffix,
+                )
+            if user_id == 1 and record["user"] is not None:
+                self.update_sensor(
+                    key=str(MedisanaBPSensor.USER),
+                    native_unit_of_measurement=None,
+                    native_value=record["user"],
+                    name="User",
+                )
             self.update_sensor(
-                key=str(MedisanaBPSensor.USER),
-                native_unit_of_measurement=None,
-                native_value=user,
-                name="User",
+                key=str(MedisanaBPSensor.SYSTOLIC) + suffix,
+                native_unit_of_measurement=Units.PRESSURE_MMHG,
+                native_value=record["syst"],
+                device_class=SensorDeviceClass.PRESSURE,
+                name="Systolic" + name_suffix,
             )
-
-        self.update_sensor(
-            key=str(MedisanaBPSensor.SYSTOLIC),
-            native_unit_of_measurement=Units.PRESSURE_MMHG,
-            native_value=syst,
-            device_class=SensorDeviceClass.PRESSURE,
-            name="Systolic",
-        )
-        self.update_sensor(
-            key=str(MedisanaBPSensor.DIASTOLIC),
-            native_unit_of_measurement=Units.PRESSURE_MMHG,
-            native_value=diast,
-            device_class=SensorDeviceClass.PRESSURE,
-            name="Diastolic",
-        )
-        if puls is not None:
             self.update_sensor(
-                key=str(MedisanaBPSensor.PULSE),
-                native_unit_of_measurement="bpm",
-                native_value=puls,
-                name="Pulse",
+                key=str(MedisanaBPSensor.DIASTOLIC) + suffix,
+                native_unit_of_measurement=Units.PRESSURE_MMHG,
+                native_value=record["diast"],
+                device_class=SensorDeviceClass.PRESSURE,
+                name="Diastolic" + name_suffix,
             )
+            if record["puls"] is not None:
+                self.update_sensor(
+                    key=str(MedisanaBPSensor.PULSE) + suffix,
+                    native_unit_of_measurement="bpm",
+                    native_value=record["puls"],
+                    name="Pulse" + name_suffix,
+                )
 
     async def _sync_clock(self, client: BleakClient) -> None:
         """Set the device clock to local time if it is off.
