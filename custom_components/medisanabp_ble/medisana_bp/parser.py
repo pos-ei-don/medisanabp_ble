@@ -398,6 +398,8 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
         self._event.clear()
         self._has_data = False
         self._records = []
+        self._last_poll_successful = False
+        subscribed = False
 
         def _disconnected_callback(client: BleakClient) -> None:
             _LOGGER.debug("BLE device disconnected: %s", client.address)
@@ -420,6 +422,7 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
                     "Bleak error starting notify on %s: %s", ble_device.address, err
                 )
                 return self._finish_update()
+            subscribed = True
 
             # Sync the clock right away: some devices disconnect on their own
             # shortly after they have sent their last stored record.
@@ -429,9 +432,8 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
             try:
                 await asyncio.wait_for(self._event.wait(), 15)
             except asyncio.TimeoutError:
-                _LOGGER.warning(
-                    "Timeout getting command data from %s.", ble_device.address
-                )
+                # The device answered but has no record it has not sent before.
+                _LOGGER.debug("No new records from %s", ble_device.address)
             except Exception as err:
                 _LOGGER.warning(
                     "Error waiting for data from %s: %s", ble_device.address, err
@@ -467,5 +469,7 @@ class MedisanaBPBluetoothDeviceData(BluetoothData):
             )
 
         self._apply_latest_record()
-        self._last_poll_successful = self._has_data
+        # A poll counts as successful once the device answered, even if it had no
+        # new record; otherwise every following advertisement would poll again.
+        self._last_poll_successful = subscribed
         return self._finish_update()
